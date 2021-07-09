@@ -2,6 +2,10 @@
 #include "tensorflow/core/framework/shape_inference.h"
 #include "tensorflow/core/framework/op_kernel.h"
 
+#include <cassert>
+#include <memory>
+#include <vector>
+
 #include "bert_layer_mb1_dynamic_tokens.h"
 #include "bert_layer_batch.h"
 
@@ -216,25 +220,6 @@ public:
       printf("Bert op Construction!\n");
       //setenv("KMP_AFFINITY", "granularity=fine,compact,1,0", 1);
       //setenv("KMP_BLOCKTIME", "1", 1);
-  
-      for (int i = 0; i < LAYERS; ++i) {
-          bert_layers[i] = NULL;
-      }
-      for (int i = 0; i < LAYERS; ++i) {
-          batch_bert_layers[i] = NULL;
-      }
-      
-      initialized = false;
-      batch_mode = false;
-  }
-
-  ~BertOp() {
-      for (int i = 0; i < LAYERS; ++i) {
-          delete bert_layers[i];
-      }
-      for (int i = 0; i < LAYERS; ++i) {
-          delete batch_bert_layers[i];
-      }
   }
 
   void Compute(OpKernelContext* context) override {
@@ -250,19 +235,19 @@ public:
     int ids_len = tensor_ids.dim_size(1);
 
     // Initialize the weights and mode
-    if (!initialized) {
-        this->batch_mode = (batch_size > 1);
-        if (this->batch_mode) {
+    if (!initialized()) {
+        if (batch_size > 1) {
+            batch_bert_layers.reserve(LAYERS);
             for (int i = 0; i < LAYERS; ++i) {
-                batch_bert_layers[i] = new BatchBertLayer<maxTokenSize, hiddenSize, intermediateSize, attentionHeadNum>(i);
+                batch_bert_layers.emplace_back(new BatchBertLayerTy(i));
             }
         } else {
+            bert_layers.reserve(LAYERS);
             for (int i = 0; i < LAYERS; ++i) {
-                bert_layers[i] = new BertLayer(i, maxTokenSize);
+                bert_layers.emplace_back(new BertLayer(i, maxTokenSize));
             }
         }
         initWeights(context);
-        initialized = true;
     }
 
     // Create an output tensor
@@ -273,7 +258,7 @@ public:
    
     hpj::Matrix<float> input_buf(embeded, total_tokens, hiddenSize, hiddenSize);
     hpj::Matrix<float> *m_data = &input_buf;
-    if (!this->batch_mode) {
+    if (!this->batch_mode()) {
         if (unlikely(batch_size > 1)) {
             printf("ERROR: initialized with mini_batch=1, but now mini_batch=%d\n", batch_size);
             exit(-1);
@@ -339,7 +324,7 @@ private:
         float *gamma2 = (float *)context->input(idx++).tensor_data().data();
         float *beta2 = (float *)context->input(idx++).tensor_data().data();
 
-        if (this->batch_mode)   {
+        if (this->batch_mode())   {
             batch_bert_layers[i]->setWeights(queryW, queryB,
                                keyW, keyB,
                                valueW, valueB,
@@ -384,12 +369,16 @@ private:
   static const int hiddenSize = 768;
   static const int intermediateSize = 3072;
   static const int attentionHeadNum = 12;
+  using BatchBertLayerTy = BatchBertLayer<maxTokenSize, hiddenSize, intermediateSize, attentionHeadNum>;
 
-  BertLayer *bert_layers[LAYERS];
-  BatchBertLayer<maxTokenSize, hiddenSize, intermediateSize, attentionHeadNum> *batch_bert_layers[LAYERS];
+  std::vector<std::unique_ptr<BertLayer>> bert_layers;
+  std::vector<std::unique_ptr<BatchBertLayerTy>> batch_bert_layers;
 
-  bool initialized;
-  bool batch_mode;
+  bool initialized() const { return !(bert_layers.empty() && batch_bert_layers.empty()); }
+  bool batch_mode() const {
+      assert((bert_layers.empty() != batch_bert_layers.empty()) && "Bert Op is not properly initialized.");
+      return !batch_bert_layers.empty();
+  }
 };
 
 
